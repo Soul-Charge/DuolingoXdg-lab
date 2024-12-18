@@ -1,3 +1,6 @@
+/**
+ * 用于开启多邻国页面并获取错误回答事件的部分
+ */
 const puppeteer = require('puppeteer');
 const fs = require('fs').promises;
 
