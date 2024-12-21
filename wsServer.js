@@ -14,7 +14,7 @@ const clients = new Map();
 const relations = new Map();
 // 本机局域网ipv4地址
 const localIp = returnLocalLANIp();
-// 开启WebSocket服务，省略ip则为localhost
+// 开启WebSocket服务
 const wss = new WebSocket.Server({ host: localIp, port: 8080 })
 
 // 注册相应连接到wss服务的事件
@@ -34,20 +34,29 @@ wss.on("connection", (ws) => {
     targetId: ''
   }));
 
+  // 处理错误消息
   ws.on("error", (error) => {
     console.error(error);
   })
 
   /**
-   * 监听客户端(DGLabApp)的消息
-   * 就是接受APP的绑定请求然后把终端ID和APP ID进行绑定这一步
+   * 监听客户端的消息，既有APP的也有自己的客户端的消息
    */
-  // NOTE:这一段是直接复制的（目前是，因为都还没搞懂）
   ws.on('message', function incoming(message) {
     console.log("收到消息：" + message)
     /**
-     * 消息格式见官方文档：
-     * https://github.com/DG-LAB-OPENSOURCE/DG-LAB-OPENSOURCE/tree/main/socket#app-%E6%94%B6%E4%BF%A1%E5%8D%8F%E8%AE%AE
+     * 客户端发来的消息，格式为JSON
+     * @type {JSON}
+     * @description json 格式: {"type":"xxx","clientId":"xxx","targetId":"xxx","message":"xxx"}
+     * type 指令:
+     * heartbeat -> 心跳包数据
+     * bind -> ID 关系绑定
+     * msg -> 波形下发/强度变化/队列清空等数据指令
+     * break -> 连接断开
+     * error -> 服务错误
+     * clientID: 第三方终端 ID
+     * targetId: APP ID
+     * message: 消息/指令
      */
     let data = null;
     try {
@@ -66,6 +75,7 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // 接受APP的绑定请求然后把终端ID和APP ID进行绑定
     if (data.type && data.clientId && data.message && data.targetId) {
       // 优先处理绑定关系
       const { clientId, targetId, message, type } = data;
@@ -74,125 +84,32 @@ wss.on("connection", (ws) => {
           // 服务器下发绑定关系
           if (clients.has(clientId) && clients.has(targetId)) {
             // relations的双方都不存在这俩id
+            // TODO: [...relations.values()]这个[]内的展开表达式搞不懂，relations.values()是一个迭代器对象，展开是什么情况
+            // 但是整体含义只是检查是否没有绑定，如果没有则进行绑定
             if (![clientId, targetId].some(id => relations.has(id) || [...relations.values()].includes(id))) {
               relations.set(clientId, targetId)
               const client = clients.get(clientId);
-              const sendData = { clientId, targetId, message: "200", type: "bind" }
+              const sendData = { clientId, targetId, message: "200", type: "bind" } // 绑定成功
               ws.send(JSON.stringify(sendData));
               client.send(JSON.stringify(sendData));
             }
             else {
-              const data = { type: "bind", clientId, targetId, message: "400" }
+              const data = { type: "bind", clientId, targetId, message: "400" } // 此id已被其他客户端绑定关系400表示绑定失败
               ws.send(JSON.stringify(data))
               return;
             }
           } else {
-            const sendData = { clientId, targetId, message: "401", type: "bind" }
+            const sendData = { clientId, targetId, message: "401", type: "bind" } // 要绑定的目标客户端不存在
             ws.send(JSON.stringify(sendData));
             return;
           }
           break;
-        case 1:
-        case 2:
-        // TODO:为什么这里case的值默认的是3啊，根本触发不了
         case "msg": 
-          // 服务器下发APP强度调节
-          if (relations.get(clientId) !== targetId) {
-            const data = { type: "bind", clientId, targetId, message: "402" }
-            ws.send(JSON.stringify(data))
-            return;
-          }
-          if (clients.has(targetId)) {
-            const client = clients.get(targetId); // 用id获取ws对象
-            // TODO:还有这里data.type - 1是搞什么，值会变成NaN的
-            const sendType = data.type - 1;
-            console.log("sendType:" + sendType);
-            // TODO:data哪来的channel字段，接收到的数据里面没有这个键啊
-            const sendChannel = data.channel ? data.channel : 1;
-            const sendStrength = data.type >= 3 ? data.strength : 1 //增加模式强度改成1
-            const msg = "strength-" + sendChannel + "+" + sendType + "+" + sendStrength;
-            const sendData = { type: "msg", clientId, targetId, message: msg }
-            client.send(JSON.stringify(sendData));
-          }
-          break;
-        case 4:
-          // 服务器下发指定APP强度
-          if (relations.get(clientId) !== targetId) {
-            const data = { type: "bind", clientId, targetId, message: "402" }
-            ws.send(JSON.stringify(data))
-            return;
-          }
-          if (clients.has(targetId)) {
-            const client = clients.get(targetId);
-            const sendData = { type: "msg", clientId, targetId, message }
-            client.send(JSON.stringify(sendData));
-          }
-          break;
-        case "clientMsg":
-          // 服务端下发给客户端的消息
-          if (relations.get(clientId) !== targetId) {
-            const data = { type: "bind", clientId, targetId, message: "402" }
-            ws.send(JSON.stringify(data))
-            return;
-          }
-          if (!data.channel) {
-            // 240531.现在必须指定通道(允许一次只覆盖一个正在播放的波形)
-            const data = { type: "error", clientId, targetId, message: "406-channel is empty" }
-            ws.send(JSON.stringify(data))
-            return;
-          }
-          if (clients.has(targetId)) {
-            //消息体 默认最少一个消息
-            let sendtime = data.time ? data.time : punishmentDuration; // AB通道的执行时间
-            const target = clients.get(targetId); //发送目标
-            const sendData = { type: "msg", clientId, targetId, message: "pulse-" + data.message }
-            let totalSends = punishmentTime * sendtime;
-            const timeSpace = 1000 / punishmentTime;
-
-            if (clientTimers.has(clientId + "-" + data.channel)) {
-              // A通道计时器尚未工作完毕, 清除计时器且发送清除APP队列消息，延迟150ms重新发送新数据
-              // 新消息覆盖旧消息逻辑
-              console.log("通道" + data.channel + "覆盖消息发送中，总消息数：" + totalSends + "持续时间A：" + sendtime)
-              ws.send("当前通道" + data.channel + "有正在发送的消息，覆盖之前的消息")
-
-              const timerId = clientTimers.get(clientId + "-" + data.channel);
-              clearInterval(timerId); // 清除定时器
-              clientTimers.delete(clientId + "-" + data.channel); // 清除 Map 中的对应项
-
-              // 发送APP波形队列清除指令
-              switch (data.channel) {
-                case "A":
-                  const clearDataA = { clientId, targetId, message: "clear-1", type: "msg" }
-                  target.send(JSON.stringify(clearDataA));
-                  break;
-
-                case "B":
-                  const clearDataB = { clientId, targetId, message: "clear-2", type: "msg" }
-                  target.send(JSON.stringify(clearDataB));
-                  break;
-                default:
-                  break;
-              }
-
-              setTimeout(() => {
-                delaySendMsg(clientId, ws, target, sendData, totalSends, timeSpace, data.channel);
-              }, 150);
-            }
-            else {
-              // 不存在未发完的消息 直接发送
-              delaySendMsg(clientId, ws, target, sendData, totalSends, timeSpace, data.channel);
-              console.log("通道" + data.channel + "消息发送中，总消息数：" + totalSends + "持续时间：" + sendtime)
-            }
-          } else {
-            console.log(`未找到匹配的客户端，clientId: ${clientId}`);
-            const sendData = { clientId, targetId, message: "404", type: "msg" }
-            ws.send(JSON.stringify(sendData));
-          }
           break;
         default:
           // 未定义的普通消息
           if (relations.get(clientId) !== targetId) {
-            const data = { type: "bind", clientId, targetId, message: "402" }
+            const data = { type: "bind", clientId, targetId, message: "402" } // 收信方和寄信方不是绑定关系
             ws.send(JSON.stringify(data))
             return;
           }
@@ -202,7 +119,7 @@ wss.on("connection", (ws) => {
             client.send(JSON.stringify(sendData));
           } else {
             // 未找到匹配的客户端
-            const sendData = { clientId, targetId, message: "404", type: "msg" }
+            const sendData = { clientId, targetId, message: "404", type: "msg" } // 未找到收信人（离线）
             ws.send(JSON.stringify(sendData));
           }
           break;
