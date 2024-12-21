@@ -41,10 +41,14 @@ wss.on("connection", (ws) => {
   /**
    * 监听客户端(DGLabApp)的消息
    * 就是接受APP的绑定请求然后把终端ID和APP ID进行绑定这一步
-   * 这一段是直接复制的（目前是，因为都还没搞懂）
    */
+  // NOTE:这一段是直接复制的（目前是，因为都还没搞懂）
   ws.on('message', function incoming(message) {
     console.log("收到消息：" + message)
+    /**
+     * 消息格式见官方文档：
+     * https://github.com/DG-LAB-OPENSOURCE/DG-LAB-OPENSOURCE/tree/main/socket#app-%E6%94%B6%E4%BF%A1%E5%8D%8F%E8%AE%AE
+     */
     let data = null;
     try {
       data = JSON.parse(message);
@@ -90,7 +94,8 @@ wss.on("connection", (ws) => {
           break;
         case 1:
         case 2:
-        case 3:
+        // TODO:为什么这里case的值默认的是3啊，根本触发不了
+        case "msg": 
           // 服务器下发APP强度调节
           if (relations.get(clientId) !== targetId) {
             const data = { type: "bind", clientId, targetId, message: "402" }
@@ -98,8 +103,11 @@ wss.on("connection", (ws) => {
             return;
           }
           if (clients.has(targetId)) {
-            const client = clients.get(targetId);
+            const client = clients.get(targetId); // 用id获取ws对象
+            // TODO:还有这里data.type - 1是搞什么，值会变成NaN的
             const sendType = data.type - 1;
+            console.log("sendType:" + sendType);
+            // TODO:data哪来的channel字段，接收到的数据里面没有这个键啊
             const sendChannel = data.channel ? data.channel : 1;
             const sendStrength = data.type >= 3 ? data.strength : 1 //增加模式强度改成1
             const msg = "strength-" + sendChannel + "+" + sendType + "+" + sendStrength;
