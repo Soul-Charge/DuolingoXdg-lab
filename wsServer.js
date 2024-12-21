@@ -12,6 +12,17 @@ const os = require('os');
 const clients = new Map();
 // 存储消息关系
 const relations = new Map();
+
+// 定义心跳消息
+const heartbeatMsg = {
+  type: "heartbeat",
+  clientId: "",
+  targetId: "",
+  message: "200"
+};
+// 定义心跳定时器
+let heartbeatInterval;
+
 // 本机局域网ipv4地址
 const localIp = returnLocalLANIp();
 // 开启WebSocket服务
@@ -127,12 +138,96 @@ wss.on("connection", (ws) => {
     }
   });
 
+  // TODO: 关闭事件，搬来的还没理解
+  ws.on('close', function close() {
+    // 连接关闭时，清除对应的 clientId 和 WebSocket 实例
+    console.log('WebSocket 连接已关闭');
+    // 遍历 clients Map，找到并删除对应的 clientId 条目
+    let clientId = '';
+    clients.forEach((value, key) => {
+      if (value === ws) {
+        // 拿到断开的客户端id
+        clientId = key;
+      }
+    });
+    console.log("断开的client id:" + clientId)
+    relations.forEach((value, key) => {
+      if (key === clientId) {
+        //网页断开 通知app
+        let appid = relations.get(key)
+        let appClient = clients.get(appid)
+        const data = { type: "break", clientId, targetId: appid, message: "209" }
+        appClient.send(JSON.stringify(data))
+        appClient.close(); // 关闭当前 WebSocket 连接
+        relations.delete(key); // 清除关系
+        console.log("对方掉线，关闭" + appid);
+      }
+      else if (value === clientId) {
+        // app断开 通知网页
+        let webClient = clients.get(key)
+        const data = { type: "break", clientId: key, targetId: clientId, message: "209" }
+        webClient.send(JSON.stringify(data))
+        webClient.close(); // 关闭当前 WebSocket 连接
+        relations.delete(key); // 清除关系
+        console.log("对方掉线，关闭" + clientId);
+      }
+    })
+    clients.delete(clientId); //清除ws客户端
+    console.log("已清除" + clientId + " ,当前size: " + clients.size)
+  });
 
+  // TODO: 错误事件，搬来的还没理解
+  ws.on('error', function (error) {
+    // 错误处理
+    console.error('WebSocket 异常:', error.message);
+    // 在此通知用户异常，通过 WebSocket 发送消息给双方
+    let clientId = '';
+    // 查找当前 WebSocket 实例对应的 clientId
+    for (const [key, value] of clients.entries()) {
+      if (value === ws) {
+        clientId = key;
+        break;
+      }
+    }
+    if (!clientId) {
+      console.error('无法找到对应的 clientId');
+      return;
+    }
+    // 构造错误消息
+    const errorMessage = 'WebSocket 异常: ' + error.message;
 
+    relations.forEach((value, key) => {
+      // 遍历关系 Map，找到并通知没掉线的那一方
+      if (key === clientId) {
+        // 通知app
+        let appid = relations.get(key)
+        let appClient = clients.get(appid)
+        const data = { type: "error", clientId: clientId, targetId: appid, message: "500" }
+        appClient.send(JSON.stringify(data))
+      }
+      if (value === clientId) {
+        // 通知网页
+        let webClient = clients.get(key)
+        const data = { type: "error", clientId: key, targetId: clientId, message: errorMessage }
+        webClient.send(JSON.stringify(data))
+      }
+    })
+  });
 
-
-
-
+  // 启动心跳定时器（如果尚未启动）
+  if (!heartbeatInterval) {
+    heartbeatInterval = setInterval(() => {
+      // 遍历 clients Map（大于0个链接），向每个客户端发送心跳消息
+      if (clients.size > 0) {
+        console.log(relations.size, clients.size, '发送心跳消息：' + new Date().toLocaleString());
+        clients.forEach((client, clientId) => {
+          heartbeatMsg.clientId = clientId;
+          heartbeatMsg.targetId = relations.get(clientId) || '';
+          client.send(JSON.stringify(heartbeatMsg));
+        });
+      }
+    }, 60 * 1000); // 每分钟发送一次心跳消息
+  }
 });
 
 /**
